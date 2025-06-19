@@ -323,6 +323,7 @@ class LLMHelper:
         data = {
             "model": self.model,
             "messages": messages,
+            "response_format": {"type": "json_object"},  # 新增这一行
         }
         
         
@@ -471,10 +472,14 @@ class VerilogAComparator:
             return original_name
 
         def get_label_port_name(module_label_name, port_original_name):
-            if is_llm_code_context:
-                # 在LLM的上下文中，我们需要找到对应的label端口名
-                llm_to_label_port_map = {v: k for k, v in port_mappings.get(module_label_name, {}).items()}
-                return llm_to_label_port_map.get(port_original_name, port_original_name)
+            try:
+                if is_llm_code_context:
+                    # 在LLM的上下文中，我们需要找到对应的label端口名
+                    llm_to_label_port_map = {v: k for k, v in port_mappings.get(module_label_name, {}).items()}
+                    return llm_to_label_port_map.get(port_original_name, port_original_name)
+            except Exception as e:
+                print(f"Error in get_label_port_name: {e}")
+                return port_original_name   
             # 在Label的上下文中，原始端口名就是label的端口名
             return port_original_name
 
@@ -542,7 +547,7 @@ class VerilogAComparator:
             loads = drive_load_info["loads"]
             
             if not drivers or not loads:
-                print(f"skip {net_name} because it has no driver or load")
+                # print(f"skip {net_name} because it has no driver or load")
                 continue
 
             # 为每个驱动源和每个负载之间创建连接
@@ -765,7 +770,10 @@ class VerilogAComparator:
         for label_mod_name, llm_mod_name in module_mappings.items():
             if not label_mod_name or not llm_mod_name: continue
             label_ports = self.parser.get_port_lists(parsed_label, label_mod_name)
-            llm_ports = self.parser.get_port_lists(parsed_llm, llm_mod_name)
+            llm_ports   = self.parser.get_port_lists(parsed_llm, llm_mod_name)
+            if label_ports is None or llm_ports is None:
+                print(f"Error: label_ports or llm_ports is None")
+                continue
             ## 计算端口数量
             label_port_count = label_port_count + len(label_ports['inputs']) + len(label_ports['outputs']) + len(label_ports['inouts'])
             llm_port_count = llm_port_count + len(llm_ports['inputs']) + len(llm_ports['outputs']) + len(llm_ports['inouts'])
@@ -838,7 +846,7 @@ class VerilogAComparator:
         self.llm_helper.session = session
         try:
             results = await self.run_comparison(label_code_str, llm_code_str)
-            final_score = results['scoring']['total_score']
+            final_score = results.get('scoring',{}).get('total_score',0)
         except Exception as e:
             print(traceback.format_exc())
             return {
@@ -955,39 +963,65 @@ if __name__ == "__main__":
         # test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
         test_list = ["1208_block_circuit_train_15k_0321_000859.jpg"]
         
-        async def process_results():
-            # 处理每个结果
-            count = 0
-            for image_name, llm_info in llm_result.items():
-                if image_name not in test_list:
-                    # print(f"{image_name} not in test_list.")
-                    continue 
+        # 创建信号量限制并发数为4
+        semaphore = asyncio.Semaphore(4)
+        
+        async def process_single_result(image_name, llm_info, benchmark_data):
+            """处理单个结果的异步函数"""
+            async with semaphore:  # 限制并发数
                 json_path = f"{results_dir}/{image_name}.json"
-
-                # if os.path.exists(json_path):
-                #     continue
+                
                 try:
-                    count+=1
-                    if count>20:
-                        continue
-                    print(f"图片路径: {image_name}")
-                    if image_name not in benchmark:
+                    print(f"开始处理图片: {image_name}")
+                    
+                    if image_name not in benchmark_data:
                         print(f"{image_name} not in benchmark.")
-                    results = await comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
+                        return
+                        
+                    results = await comparator.run_comparison(benchmark_data[image_name]['answer'], llm_info['answer'])
 
                     # 保存JSON结果
                     with open(json_path, "w", encoding="utf-8") as f:
                         json.dump(results, f, ensure_ascii=False, indent=4)
 
-                    # print(results)
-                    
                     # 生成并保存HTML报告
                     html_content = generate_html_report(results, image_name)
                     with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
                         f.write(html_content)
+                        
+                    print(f"完成处理图片: {image_name}")
+                    
                 except Exception as e:
+                    print(f"处理 {image_name} 时发生错误: {e}")
                     print(traceback.format_exc())
-                    print(e)
+        
+        async def process_results():
+            """并发处理所有结果"""
+            # 创建任务列表
+            tasks = []
+            count = 0
+            
+            for image_name, llm_info in llm_result.items():
+                if image_name not in test_list:
+                    continue 
+                    
+                # 跳过已存在的结果文件
+                json_path = f"{results_dir}/{image_name}.json"
+                if os.path.exists(json_path):
+                    continue
+                    
+                count += 1
+                if count > 20:
+                    break
+                    
+                # 创建异步任务
+                task = process_single_result(image_name, llm_info, benchmark)
+                tasks.append(task)
+            
+            # 并发执行所有任务
+            print(f"开始并发处理 {len(tasks)} 个任务...")
+            await asyncio.gather(*tasks, return_exceptions=True)
+            print("所有任务处理完成！")
         
         # 运行异步函数
         asyncio.run(process_results())
