@@ -478,7 +478,7 @@ class VerilogAComparator:
                     llm_to_label_port_map = {v: k for k, v in port_mappings.get(module_label_name, {}).items()}
                     return llm_to_label_port_map.get(port_original_name, port_original_name)
             except Exception as e:
-                print(f"Error in get_label_port_name: {e}")
+                print(f"Error in get_label_port_name: {traceback.format_exc()}:{module_label_name},{port_original_name}")
                 return port_original_name   
             # 在Label的上下文中，原始端口名就是label的端口名
             return port_original_name

@@ -12,6 +12,7 @@ from src.image_processor import ImageProcessor
 from src.model_client import AnswerApiClient
 from src.grading_client import VerilogAGradingClient
 from src.grading_veriloga import VerilogAComparator
+import traceback
 
 class VerilogAEvaluator:
     def __init__(self, config: Config):
@@ -41,6 +42,9 @@ class VerilogAEvaluator:
                 "total_component_score": 0.0,
                 "total_connection_score": 0.0,
                 "total_score": 0.0,
+                "total_perfect_samples": 0,
+                "total_perfect_score": 0.0,
+                "total_perfect_ratio": 0,
                 "total_correct_components": 0,
                 "total_correct_connections": 0,
                 "total_generated_components": 0,
@@ -253,6 +257,10 @@ class VerilogAEvaluator:
                     self.results_stats["verilog_a_metrics"]["total_correct_connections"] += len(connection_analysis.get("correct_connections", []))
                     self.results_stats["verilog_a_metrics"]["total_generated_connections"] += connection_analysis.get("total_generated_connections", 0)
                     self.results_stats["verilog_a_metrics"]["total_reference_connections"] += connection_analysis.get("total_reference_connections", 0)
+
+                    ##全对数量
+                    self.results_stats["verilog_a_metrics"]["total_perfect_samples"] += 1 if scoring.get("total_score", 0) >= 100 else 0
+
                 
                 # 更新token使用量
                 if "usage" not in grading_result:
@@ -323,7 +331,6 @@ class VerilogAEvaluator:
                 self.results_stats["scores_by_prompt"][prompt_key].append(score)
                 
             except Exception as e:
-                import traceback
                 # Error handling
                 error_result = {
                     "error": f"{str(e)}\n{traceback.format_exc()}",
@@ -414,7 +421,6 @@ class VerilogAEvaluator:
                     with open(result_file, 'w', encoding='utf-8') as f:
                         json.dump(current_img_results, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                import traceback
                 print(f"Error saving individual results: {str(e)}\n{traceback.format_exc()}")
         
         return results
@@ -501,6 +507,12 @@ class VerilogAEvaluator:
                     "successful_samples": self.results_stats["successful_samples"],
                     "failed_samples": self.results_stats["failed_samples"],
                     "success_rate": (self.results_stats["successful_samples"] / self.results_stats["total_samples"]) * 100 if self.results_stats["total_samples"] > 0 else 0,
+                    "overall_perfect_ratio": self.results_stats["verilog_a_metrics"]["total_perfect_samples"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
+                    "component_mapping_score": self.results_stats["verilog_a_metrics"]["total_component_mapping_score"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
+                    "port_mapping_score": self.results_stats["verilog_a_metrics"]["total_port_mapping_score"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
+                    "component_score": self.results_stats["verilog_a_metrics"]["total_component_score"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
+                    "connection_score": self.results_stats["verilog_a_metrics"]["total_connection_score"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
+                    "total_score": self.results_stats["verilog_a_metrics"]["total_score"] / self.results_stats["successful_samples"] if self.results_stats["successful_samples"] > 0 else 0,
                     "overall_average_score": statistics.mean(all_scores) if all_scores else 0,
                     "overall_median_score": statistics.median(all_scores) if all_scores else 0,
                     "overall_std_score": statistics.stdev(all_scores) if len(all_scores) > 1 else 0,
@@ -541,7 +553,6 @@ class VerilogAEvaluator:
                 json.dump(summary_data, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            import traceback
             print(f"Error updating summary file: {str(e)}\n{traceback.format_exc()}")
 
     def save_verilog_a_metrics_summary(self):
@@ -575,18 +586,25 @@ class VerilogAEvaluator:
         if self.results_stats["successful_samples"] > 0:
             successful_count = self.results_stats["successful_samples"]
             verilog_metrics = self.results_stats["verilog_a_metrics"]
-            
-            overall_metrics = {
-                "average_component_score": verilog_metrics["total_component_score"] / successful_count,
-                "average_connection_score": verilog_metrics["total_connection_score"] / successful_count,
-                "average_total_score": verilog_metrics["total_score"] / successful_count,
-                "total_correct_components": verilog_metrics["total_correct_components"],
-                "total_generated_components": verilog_metrics["total_generated_components"],
-                "total_reference_components": verilog_metrics["total_reference_components"],
-                "total_correct_connections": verilog_metrics["total_correct_connections"],
-                "total_generated_connections": verilog_metrics["total_generated_connections"],
-                "total_reference_connections": verilog_metrics["total_reference_connections"]
-            }
+            try:
+                overall_metrics = {
+                    "average_component_mapping_score": verilog_metrics["total_component_mapping_score"] / successful_count,
+                    "average_port_mapping_score": verilog_metrics["total_port_mapping_score"] / successful_count,
+                    "average_component_score": verilog_metrics["total_component_score"] / successful_count,
+                    "average_connection_score": verilog_metrics["total_connection_score"] / successful_count,
+                    "average_total_score": verilog_metrics["total_score"] / successful_count,
+                    "average_perfect_ratio": verilog_metrics["total_perfect_samples"] / successful_count,
+                    "total_perfect_samples": verilog_metrics["total_perfect_samples"],
+                    "total_correct_components": verilog_metrics["total_correct_components"],
+                    "total_generated_components": verilog_metrics["total_generated_components"],
+                    "total_reference_components": verilog_metrics["total_reference_components"],
+                    "total_correct_connections": verilog_metrics["total_correct_connections"],
+                    "total_generated_connections": verilog_metrics["total_generated_connections"],
+                    "total_reference_connections": verilog_metrics["total_reference_connections"]
+                }
+            except Exception as e:
+                print(f"Error saving Verilog-A metrics summary: {traceback.format_exc()},{verilog_metrics}")
+                overall_metrics = {}
         else:
             overall_metrics = {}
         
@@ -720,7 +738,6 @@ class VerilogAEvaluator:
                                 self._update_summary()
                                 
                         except Exception as e:
-                            import traceback
                             error_info = f"Error processing {item.get('img', 'unknown')} with {prompt_key}: {str(e)}\n{traceback.format_exc()}"
                             print(f"\n{error_info}")
                             
