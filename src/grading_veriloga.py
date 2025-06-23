@@ -947,7 +947,7 @@ if __name__ == "__main__":
         llm_helper = LLMHelper(model="gpt-4o") # Or "gpt-4o" / "gpt-4-turbo"
         parser = VerilogAParser()   
         comparator = VerilogAComparator(parser, llm_helper)
-        from src.show_html import generate_html_report
+        from tools.show_result.show_html import generate_html_report
 
         results_dir = ".cache/results_soft"
         import shutil
