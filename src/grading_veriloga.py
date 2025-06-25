@@ -8,6 +8,9 @@ import traceback
 import aiohttp
 from typing import Dict, Any, List, Tuple, Optional
 import time 
+
+import sys 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import Config
 import asyncio
 
@@ -237,6 +240,7 @@ class LLMHelper:
 
         if not api_key:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
+
         self.client = OpenAI(api_key=api_key,base_url=base_url)
         self.model = model
         self.api_key = api_key
@@ -616,7 +620,7 @@ class VerilogAComparator:
     def get_port_score(self,results,tp_port,fp_port,fn_port):
 
         results["port_metrics"]["tp"] = tp_port
-        results["port_metrics"]["fp"] = fp_port 
+        results["port_metrics"]["fp"] = fp_port
         results["port_metrics"]["fn"] = fn_port
         p, r, f1 = self._calculate_precision_recall_f1(tp_port, fp_port, fn_port)
         results["port_metrics"]["precision"] = p
@@ -666,6 +670,82 @@ class VerilogAComparator:
                     mapped_label_modules_in_tp.add(label_mod)
                     match_modules.append([label_mod,llm_mapped_name])
         return match_modules,mapped_llm_modules_in_tp,mapped_label_modules_in_tp
+    
+    def check_connection_correct(self,matched_connections,FP_conections_pair, FN_conections_pair):        ##再次校正
+            """
+            基于模块级别的匹配来校正连接，处理模块匹配正确但端口匹配错误的情况
+            返回：校正后的FP连接、校正后的FN连接、新发现的匹配连接
+            """
+            # 第一步：提取模块级别的连接
+            FP_module_connections = []
+            FN_module_connections = []
+            
+            # 存储原始的模块+端口对，用于后续映射回去
+            FP_original_mapping = {}  # 模块连接 -> 原始模块+端口连接列表
+            FN_original_mapping = {}  # 模块连接 -> 原始模块+端口连接列表
+            
+            # 处理FP连接
+            for FP_pair in FP_conections_pair:
+                module_conn = (FP_pair[0][0], FP_pair[1][0])  # (源模块, 目标模块)
+                FP_module_connections.append(module_conn)
+                
+                # 建立模块连接到原始连接的映射
+                if module_conn not in FP_original_mapping:
+                    FP_original_mapping[module_conn] = []
+                FP_original_mapping[module_conn].append(FP_pair)
+            
+            # 处理FN连接
+            for FN_pair in FN_conections_pair:
+                module_conn = (FN_pair[0][0], FN_pair[1][0])  # (源模块, 目标模块)
+                FN_module_connections.append(module_conn)
+                
+                # 建立模块连接到原始连接的映射
+                if module_conn not in FN_original_mapping:
+                    FN_original_mapping[module_conn] = []
+                FN_original_mapping[module_conn].append(FN_pair)
+            
+            # 第二步：找出模块级别的交集（即模块匹配正确但端口可能错误的连接）
+            FP_module_set = set(FP_module_connections)
+            FN_module_set = set(FN_module_connections)
+            module_intersection = FP_module_set.intersection(FN_module_set)
+            
+            # 第三步：将模块级别匹配的连接转换为新的匹配连接
+            # 这些连接在模块级别是正确的，应该被认为是匹配的
+            newly_matched_connections = []
+            for module_conn in module_intersection:
+                # 从FP中选择一个代表性的连接作为新的匹配连接
+                if module_conn in FN_original_mapping:
+                    # 选择第一个连接作为代表
+                    representative_conn = FN_original_mapping[module_conn][0]
+                    newly_matched_connections.append(representative_conn)
+            
+            # 第四步：移除模块级别匹配的连接，保留真正的FP和FN
+            remaining_FP_modules = FP_module_set - module_intersection
+            remaining_FN_modules = FN_module_set - module_intersection
+            
+            # 第五步：将模块级别的连接映射回原始的模块+端口连接
+            final_FP_connections = []
+            final_FN_connections = []
+            
+            # 处理剩余的FP连接
+            for module_conn in remaining_FP_modules:
+                if module_conn in FP_original_mapping:
+                    # 如果一个模块连接对应多个端口连接，保留所有的端口连接
+                    for original_conn in FP_original_mapping[module_conn]:
+                        final_FP_connections.append(original_conn)
+            
+            # 处理剩余的FN连接  
+            for module_conn in remaining_FN_modules:
+                if module_conn in FN_original_mapping:
+                    # 如果一个模块连接对应多个端口连接，保留所有的端口连接
+                    for original_conn in FN_original_mapping[module_conn]:
+                        final_FN_connections.append(original_conn)
+            
+            # 去重处理
+            final_FP_connections = list(set(final_FP_connections))
+            final_FN_connections = list(set(final_FN_connections))
+            newly_matched_connections= list(set(matched_connections+newly_matched_connections))
+            return final_FP_connections, final_FN_connections, newly_matched_connections
 
     
 
@@ -740,6 +820,8 @@ class VerilogAComparator:
         # 获取模块映射结果
         module_mappings = await self.llm_helper.map_module_names(label_module_sigs, llm_module_sigs, label_top, llm_top)
 
+        print(module_mappings)
+
         # print(module_mappings)
         results["module_mappings"] = module_mappings
         results["total_correct_components"] = module_mappings
@@ -782,9 +864,9 @@ class VerilogAComparator:
                     label_mod_name, label_ports, llm_mod_name, llm_ports
                 )
                 match_port_count = match_port_count + len(port_mappings[label_mod_name])
-        port_match_tp = match_port_count / label_port_count if label_port_count > 0 else 0
-        port_match_fp = (llm_port_count - match_port_count) / llm_port_count if llm_port_count > 0 else 0
-        port_match_fn = (label_port_count - match_port_count) / label_port_count if label_port_count > 0 else 0
+        port_match_tp = match_port_count
+        port_match_fp = llm_port_count - match_port_count
+        port_match_fn = label_port_count - match_port_count
         results = self.get_port_score(results,port_match_tp,port_match_fp,port_match_fn)
         results["port_mappings"] = port_mappings
 
@@ -795,10 +877,13 @@ class VerilogAComparator:
         results['matched_connections'] = list(label_connections.intersection(llm_connections))
         results['FP_connections'] = list(llm_connections - label_connections)
         results['FN_connections'] = list(label_connections - llm_connections)
+
+        results['FP_connections'], results['FN_connections'], results['matched_connections']  = self.check_connection_correct(results['matched_connections'] ,results['FP_connections'], results['FN_connections'])
+
         results['label_connections'] = list(label_connections)
         results['llm_connections'] = list(llm_connections)
 
-        results["total_correct_connections"] = list(label_connections.intersection(llm_connections))
+        results["total_correct_connections"] = results['matched_connections'] 
         results["total_generated_connections"] = list(ori_llm_connections)
         results["total_reference_connections"] = list(label_connections)
 
@@ -929,102 +1014,164 @@ def get_benchmark(json_dir):
                 'answer': answer,
                 'images': image_path,
             }
-            
             results[image_path]=result
         return results
         
     except Exception as e:
         print(f"读取JSON文件时发生错误: {str(e)}")
         return [] 
+    
+def get_round_json_files(results_dir):
+    """获取所有JSON文件并按score倒序排序"""
+    import glob
+    files = glob.glob(os.path.join(results_dir, '*.json'))
+    
+    # 读取每个文件的score信息
+    results = {}
+    for file in files:
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 获取score，如果不存在则设为0
+                image_name = data.get('image',{}).get('file','')
+                llm_result = data.get('results', {}).get('prompt6', [{}])[0].get('generation', {})
+                result = {
+                    'answer': llm_result,
+                    'images': image_name
+                }
+                results[image_name] = result
+        except (json.JSONDecodeError, IndexError, KeyError):
+            # 如果读取失败，score设为0
+            print(traceback.format_exc())
+            pass 
+    
+    
+    return results
 
 # --- Main Execution (Test Code) ---
 if __name__ == "__main__":
     
     try:
+        from src.config import Config
+        config = Config()
         # --- Initialization ---
         # Pass your OpenAI API Key here or ensure OPENAI_API_KEY env var is set
         # For model, you can use "gpt-4-turbo-preview" or other compatible models
-        llm_helper = LLMHelper(model="gpt-4o") # Or "gpt-4o" / "gpt-4-turbo"
-        parser = VerilogAParser()   
-        comparator = VerilogAComparator(parser, llm_helper)
-        from tools.show_result.show_html import generate_html_report
-
+        api_key = os.getenv("OPENAI_API_KEY").strip()
+        base_url = os.getenv("OPENAI_BASE_URL").strip()
+        print(api_key,base_url)
+        
+        # 获取所有LLM生成的结果
+        # llm_result = get_llm_result(".cache/converted_conversations.json")
+        llm_result = get_round_json_files("/data/home/libo/work/MultiModal-Evaluator/benchmark_output/20250623_all_va_data_qwen2.5-vl-32b_v1")
+        benchmark = get_benchmark(".cache/system_block_benchmark_v2_verilogA.json")
+        # test_list=["14128_2078_block_circuit_train_15k_0321_001118.jpg"] #"2747_block_circuit_train_15k_0321_001209.jpg",
+        # test_list = ["2695_block_circuit_train_15k_0321_001159.jpg"]
+        # test_list = ["2622_block_circuit_train_15k_0321_001159.jpg"]
+        # test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
+        test_list = ["24325_182_block_circuit_train_15k_0321_000755.jpg"]
+        test_list = ["2462_block_circuit_train_15k_0321_001159.jpg"]
+        
         results_dir = ".cache/results_soft"
         import shutil
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
-
-        # 获取所有LLM生成的结果
-        llm_result = get_llm_result(".cache/converted_conversations.json")
-        benchmark = get_benchmark(".cache/system_block_benchmark_v2_verilogA.json")
-        # test_list=["14128_2078_block_circuit_train_15k_0321_001118.jpg"] #"2747_block_circuit_train_15k_0321_001209.jpg",
-        # test_list = ["2695_block_circuit_train_15k_0321_001159.jpg"]
-        test_list = ["2622_block_circuit_train_15k_0321_001159.jpg"]
-        # test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
-        test_list = ["1208_block_circuit_train_15k_0321_000859.jpg"]
         
-        # 创建信号量限制并发数为4
-        semaphore = asyncio.Semaphore(4)
-        
-        async def process_single_result(image_name, llm_info, benchmark_data):
-            """处理单个结果的异步函数"""
-            async with semaphore:  # 限制并发数
-                json_path = f"{results_dir}/{image_name}.json"
-                
-                try:
-                    print(f"开始处理图片: {image_name}")
-                    
-                    if image_name not in benchmark_data:
-                        print(f"{image_name} not in benchmark.")
-                        return
-                        
-                    results = await comparator.run_comparison(benchmark_data[image_name]['answer'], llm_info['answer'])
-
-                    # 保存JSON结果
-                    with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(results, f, ensure_ascii=False, indent=4)
-
-                    # 生成并保存HTML报告
-                    html_content = generate_html_report(results, image_name)
-                    with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
-                        f.write(html_content)
-                        
-                    print(f"完成处理图片: {image_name}")
-                    
-                except Exception as e:
-                    print(f"处理 {image_name} 时发生错误: {e}")
-                    print(traceback.format_exc())
+        from tools.show_result.show_html import generate_html_report
         
         async def process_results():
             """并发处理所有结果"""
-            # 创建任务列表
-            tasks = []
-            count = 0
-            
-            for image_name, llm_info in llm_result.items():
-                if image_name not in test_list:
-                    continue 
-                    
-                # 跳过已存在的结果文件
-                json_path = f"{results_dir}/{image_name}.json"
-                if os.path.exists(json_path):
-                    continue
-                    
-                count += 1
-                if count > 20:
-                    break
-                    
-                # 创建异步任务
-                task = process_single_result(image_name, llm_info, benchmark)
-                tasks.append(task)
-            
-            # 并发执行所有任务
-            print(f"开始并发处理 {len(tasks)} 个任务...")
-            await asyncio.gather(*tasks, return_exceptions=True)
-            print("所有任务处理完成！")
+            # 在异步函数中创建session和相关组件
+            async with aiohttp.ClientSession() as session:
+                # 创建LLMHelper并传入session
+                llm_helper = LLMHelper(
+                    model="o4-mini",
+                    api_key=api_key,
+                    base_url=base_url,
+                    session=session,  # 传入session
+                    config=config
+                )
+                parser = VerilogAParser()   
+                comparator = VerilogAComparator(config=config, parser=parser, llm_helper=llm_helper)
+                
+                # 创建信号量限制并发数为4
+                semaphore = asyncio.Semaphore(4)
+                
+                async def process_single_result(image_name, llm_info, benchmark_data):
+                    """处理单个结果的异步函数"""
+                    async with semaphore:  # 限制并发数
+                        json_path = f"{results_dir}/{image_name}.json"
+                        
+                        try:
+                            print(f"开始处理图片: {image_name}")
+                            
+                            if image_name not in benchmark_data:
+                                print(f"{image_name} not in benchmark.")
+                                return
+                            
+                            # 使用grade方法，它会自动处理session
+                            results = await comparator.grade(
+                                session=session,
+                                prompt="",  # 这里可以传入空字符串，因为grade方法主要用于评分
+                                llm_code_str=llm_info['answer'],
+                                label_code_str=benchmark_data[image_name]['answer']
+                            )
+                            
+                            # 从results中提取verilog_a_analysis部分作为主要结果
+                            main_results = results.get('verilog_a_analysis', results)
+
+                            # 保存JSON结果
+                            with open(json_path, "w", encoding="utf-8") as f:
+                                json.dump(main_results, f, ensure_ascii=False, indent=4)
+
+                            # 生成并保存HTML报告
+                            html_content = generate_html_report(main_results, image_name)
+                            with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
+                                f.write(html_content)
+                                
+                            print(f"完成处理图片: {image_name}")
+                            return main_results
+                            
+                        except Exception as e:
+                            print(f"处理 {image_name} 时发生错误: {e}")
+                            print(traceback.format_exc())
+                            return None
+                
+                # 创建任务列表
+                tasks = []
+                count = 0
+                
+                for image_name, llm_info in llm_result.items():
+                    if image_name not in test_list:
+                        continue 
+                        
+                    # 跳过已存在的结果文件
+                    json_path = f"{results_dir}/{image_name}.json"
+                    # if os.path.exists(json_path):
+                    #     continue
+                        
+                    count += 1
+                    if count > 20:
+                        break
+                        
+                    # 创建异步任务
+                    task = process_single_result(image_name, llm_info, benchmark)
+                    tasks.append(task)
+                
+                # 并发执行所有任务
+                print(f"开始并发处理 {len(tasks)} 个任务...")
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if result is not None:
+                        print(result['connection_metrics'])
+                print("所有任务处理完成！")
         
         # 运行异步函数
-        asyncio.run(process_results())
+        for i in range(1): 
+            print(f"开始第{i+1}次处理...")
+            asyncio.run(process_results())
+            print(f"第{i+1}次处理完成！")
+        
             
     except Exception as e:
         print(traceback.format_exc())

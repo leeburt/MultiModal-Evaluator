@@ -3,7 +3,10 @@ import json
 
 def generate_html_report(data, image_name=None, image_path=None):
         """生成HTML格式的评估报告"""
-        results = data['results']['prompt6'][0]['verilog_a_analysis']
+        if "results" in data:
+            results = data['results']['prompt6'][0]['verilog_a_analysis']
+        else:
+            results = data
         if image_name is None:
             image_name = data.get('image', {}).get('file', 'unknown_image')
             

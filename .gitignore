@@ -9,3 +9,5 @@ command.txt
 benchmark_output
 
 run.sh
+set_env.sh
+recalcuate.py
